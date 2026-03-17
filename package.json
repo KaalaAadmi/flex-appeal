@@ -55,5 +55,11 @@
     "eslint-config-expo": "~10.0.0",
     "typescript": "~5.9.2"
   },
-  "private": true
+  "private": true,
+  "packageManager": "pnpm@10.11.0",
+  "pnpm": {
+    "patchedDependencies": {
+      "expo-task-manager@55.0.9": "patches/expo-task-manager@55.0.9.patch"
+    }
+  }
 }
