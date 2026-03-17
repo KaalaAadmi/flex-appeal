@@ -20,6 +20,7 @@ import {
   initializeHealthKit,
   healthKitUnavailableReason,
   fetchAndSyncHealthData,
+  syncUserDetailsFromHealthKit,
 } from "@/services/health";
 
 const ORANGE = "#E8651A";
@@ -415,6 +416,13 @@ export default function ProfileScreen() {
                     "Sync Complete",
                     `Successfully synced ${syncResult.synced} day(s) of health data.`,
                   );
+                }
+
+                // Also sync user details (height, weight, age, gender) on first connect
+                const detailsUpdated = await syncUserDetailsFromHealthKit();
+                if (detailsUpdated) {
+                  // Re-fetch profile to reflect HealthKit-sourced values
+                  fetchProfile();
                 }
               } catch (err) {
                 console.warn("HealthKit connect error:", err);

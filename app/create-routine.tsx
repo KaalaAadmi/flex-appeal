@@ -1247,7 +1247,7 @@ function StepSummary({
   const workoutDays = days.filter((d) => !d.isRest);
   const restDays = days.filter((d) => d.isRest);
   const totalCardioMin = segments.reduce(
-    (a, seg) => a + (parseInt(seg.durationMinutes) || 0),
+    (a, seg) => a + (parseFloat(seg.durationMinutes) || 0),
     0,
   );
 
@@ -1632,7 +1632,7 @@ export default function CreateRoutineScreen() {
       const workoutDays = days.filter((d) => !d.isRest);
       const restCount = days.filter((d) => d.isRest).length;
       const totalCardioMin = cardioSegments.reduce(
-        (a, seg) => a + (parseInt(seg.durationMinutes) || 0),
+        (a, seg) => a + (parseFloat(seg.durationMinutes) || 0),
         0,
       );
 

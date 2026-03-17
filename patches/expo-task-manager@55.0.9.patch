@@ -1,0 +1,40 @@
+diff --git a/ios/TaskManagerModule.swift b/ios/TaskManagerModule.swift
+index 6322978baef5784d4ea185ed670a610895a2aa2c..cb41c4d54af70633d86fbd1e65e66d7e3f32e756 100644
+--- a/ios/TaskManagerModule.swift
++++ b/ios/TaskManagerModule.swift
+@@ -17,7 +17,7 @@ public final class TaskManagerModule: Module, EXTaskManagerInterface {
+     Events(EXECUTE_TASK_EVENT_NAME)
+ 
+     OnCreate {
+-      EXTaskService.shared.setTaskManager(self, forAppId: appId, withUrl: findAppUrl())
++      EXTaskService.shared.setTaskManager(self, forAppId: appId, withUrl: findAppUrl() ?? "")
+     }
+ 
+     Constant("EVENT_NAME") {
+@@ -78,7 +78,7 @@ public final class TaskManagerModule: Module, EXTaskManagerInterface {
+   }
+ 
+   public func registerTask(withName taskName: TaskName, consumer consumerClass: AnyClass, options: [AnyHashable: Any] = [:]) {
+-    let appUrl = findAppUrl()
++    let appUrl = findAppUrl() ?? ""
+     EXTaskService.shared.registerTask(withName: taskName, appId: appId, appUrl: appUrl, consumerClass: consumerClass, options: options)
+   }
+ 
+@@ -90,14 +90,14 @@ public final class TaskManagerModule: Module, EXTaskManagerInterface {
+     return EXTaskService.hasBackgroundModeEnabled(backgroundMode)
+   }
+ 
+-  public func execute(withBody body: [String: Any]) {
++  public func execute(withBody body: [AnyHashable: Any]) {
+     if eventsQueue != nil {
+       // The module was created, but JS is not listening for events yet.
+       // In that case we need to queue them up.
+-      eventsQueue?.append(body)
++      eventsQueue?.append(body as? [String: Any] ?? [:])
+     } else {
+       // JS is already listening to the event, we can emit it straight away.
+-      sendEvent(EXECUTE_TASK_EVENT_NAME, body)
++      sendEvent(EXECUTE_TASK_EVENT_NAME, body as? [String: Any] ?? [:])
+     }
+   }
+ 

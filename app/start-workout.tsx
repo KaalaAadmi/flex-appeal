@@ -14,6 +14,8 @@ import {
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useState, useEffect, useRef } from "react";
 import { Audio } from "expo-av";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import * as Notifications from "expo-notifications";
 import { Routine, RoutineDay } from "@/data/routine-types";
 import { getRoutine, createWorkout } from "@/services/api";
 import { getCumulativeActiveCalories } from "@/services/health";
@@ -32,17 +34,21 @@ const YELLOW = "#F39C12";
 
 type Phase = "warmup" | "workout" | "cardio" | "done";
 
-// ─── Timer Hook ──────────────────────────────────────
+// ─── Timer Hook (wall-clock based — survives backgrounding) ──
 
 function useTimer() {
   const [seconds, setSeconds] = useState(0);
   const [running, setRunning] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startedAtRef = useRef<number>(0); // wall-clock ms
+  const accumulatedRef = useRef<number>(0); // seconds banked before last pause
 
   useEffect(() => {
     if (running) {
+      startedAtRef.current = Date.now();
       intervalRef.current = setInterval(() => {
-        setSeconds((prev) => prev + 1);
+        const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
+        setSeconds(accumulatedRef.current + elapsed);
       }, 1000);
     } else if (intervalRef.current) {
       clearInterval(intervalRef.current);
@@ -53,9 +59,16 @@ function useTimer() {
   }, [running]);
 
   const start = () => setRunning(true);
-  const pause = () => setRunning(false);
+  const pause = () => {
+    // Bank the elapsed time
+    accumulatedRef.current =
+      accumulatedRef.current +
+      Math.floor((Date.now() - startedAtRef.current) / 1000);
+    setRunning(false);
+  };
   const reset = () => {
     setRunning(false);
+    accumulatedRef.current = 0;
     setSeconds(0);
   };
 
@@ -72,76 +85,137 @@ function formatTime(totalSeconds: number): string {
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 }
 
-// ─── Countdown Timer Hook (for cardio segments) ──────
+// Custom tone, bundled asset (user-provided mp3)
+const TONE_ASSET = require("@/assets/sounds/tone.mp3");
+
+// ─── Notification helper ───────────────────────────────
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
+
+async function requestNotificationPermission() {
+  const { status } = await Notifications.getPermissionsAsync();
+  if (status !== "granted") {
+    await Notifications.requestPermissionsAsync();
+  }
+}
+
+/**
+ * Schedule a notification to fire after `delaySec` seconds.
+ * When delaySec === 0, fires immediately (trigger: null).
+ * Returns the notification identifier so it can be cancelled.
+ */
+async function scheduleNotification(
+  title: string,
+  body: string,
+  delaySec: number = 0,
+): Promise<string> {
+  return Notifications.scheduleNotificationAsync({
+    content: { title, body, sound: "tone.mp3" },
+    trigger:
+      delaySec > 0
+        ? {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: delaySec,
+            repeats: false,
+          }
+        : null,
+  });
+}
+
+/**
+ * Cancel a previously scheduled notification by its identifier.
+ */
+async function cancelScheduledNotification(id: string) {
+  try {
+    await Notifications.cancelScheduledNotificationAsync(id);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ─── Countdown Timer Hook (wall-clock based) ─────────
 
 function useCountdown() {
   const [remaining, setRemaining] = useState(0);
   const [running, setRunning] = useState(false);
   const [bellRung, setBellRung] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const endAtRef = useRef<number>(0);
   const onCompleteRef = useRef<(() => void) | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
 
-  // Play a short tone using expo-av
   const playTone = async () => {
     try {
+      // Duck other audio (e.g. music) so the tone stands out
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: true,
         staysActiveInBackground: true,
+        interruptionModeIOS: 2, // InterruptionModeIOS.DuckOthers
+        shouldDuckAndroid: true,
+        interruptionModeAndroid: 2, // InterruptionModeAndroid.DuckOthers
       });
-      // Generate a simple beep using an oscillator-like approach
-      // We use a data URI for a short WAV beep tone
-      const { sound } = await Audio.Sound.createAsync(
-        // A short 1-second 880Hz beep WAV encoded as base64 data URI
-        {
-          uri: "data:audio/wav;base64,UklGRlwAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YTgAAAD/f/9//3//f/9//3//f/9//3//f/9//3//f/9//3//f/9//3//f/9//3//f/9//3//f/9//38=",
-        },
-        { shouldPlay: false, volume: 1.0, isLooping: true },
-      );
+      const { sound } = await Audio.Sound.createAsync(TONE_ASSET, {
+        shouldPlay: false,
+        volume: 0.8,
+        isLooping: false,
+      });
       soundRef.current = sound;
       await sound.playAsync();
-      // Stop after 3 seconds
+      // Auto-unload after playback, then restore audio mode so other apps resume
       setTimeout(async () => {
         try {
           await sound.stopAsync();
           await sound.unloadAsync();
           soundRef.current = null;
+          // Restore mixing so the user's music returns to full volume
+          await Audio.setAudioModeAsync({
+            playsInSilentModeIOS: true,
+            staysActiveInBackground: true,
+            interruptionModeIOS: 1, // InterruptionModeIOS.MixWithOthers
+            shouldDuckAndroid: false,
+            interruptionModeAndroid: 1, // InterruptionModeAndroid.DoNotMix → actually MixWithOthers = 1
+          });
         } catch {
-          // ignore
+          /* ignore */
         }
-      }, 3000);
+      }, 1200);
     } catch (err) {
       console.warn("Could not play countdown tone:", err);
     }
   };
 
   useEffect(() => {
-    if (running && remaining > 0) {
+    if (running) {
       intervalRef.current = setInterval(() => {
-        setRemaining((prev) => {
-          if (prev <= 1) {
-            setRunning(false);
-            // Segment complete
-            if (onCompleteRef.current) onCompleteRef.current();
-            return 0;
-          }
-          // Tone 10 seconds before end
-          if (prev === 11 && !bellRung) {
-            playTone();
-            setBellRung(true);
-          }
-          return prev - 1;
-        });
-      }, 1000);
+        const now = Date.now();
+        const left = Math.max(0, Math.ceil((endAtRef.current - now) / 1000));
+        setRemaining(left);
+
+        if (left <= 10 && left > 0 && !bellRung) {
+          playTone();
+          setBellRung(true);
+        }
+
+        if (left <= 0) {
+          setRunning(false);
+          if (onCompleteRef.current) onCompleteRef.current();
+        }
+      }, 250);
     } else if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [running, remaining, bellRung]);
+  }, [running, bellRung]);
 
-  // Cleanup sound on unmount
   useEffect(() => {
     return () => {
       if (soundRef.current) {
@@ -152,14 +226,24 @@ function useCountdown() {
   }, []);
 
   const startCountdown = (totalSeconds: number, onComplete: () => void) => {
+    endAtRef.current = Date.now() + totalSeconds * 1000;
     setRemaining(totalSeconds);
     setBellRung(false);
     onCompleteRef.current = onComplete;
     setRunning(true);
   };
 
-  const pause = () => setRunning(false);
-  const resume = () => setRunning(true);
+  const pause = () => {
+    const now = Date.now();
+    const left = Math.max(0, Math.ceil((endAtRef.current - now) / 1000));
+    setRemaining(left);
+    setRunning(false);
+  };
+
+  const resume = () => {
+    endAtRef.current = Date.now() + remaining * 1000;
+    setRunning(true);
+  };
 
   return { remaining, running, startCountdown, pause, resume };
 }
@@ -482,33 +566,87 @@ function CardioPhase({
 }) {
   const segments = routine.cardioSegments || [];
   const [currentSegIdx, setCurrentSegIdx] = useState(0);
-  const [started, setStarted] = useState(false);
+  const [sessionStarted, setSessionStarted] = useState(false);
   const [segmentsDone, setSegmentsDone] = useState<boolean[]>(
     segments.map(() => false),
   );
   const countdown = useCountdown();
 
   const isTreadmill = routine.cardioType === "Treadmill";
-  const currentSeg = segments[currentSegIdx];
   const allDone = segmentsDone.every(Boolean);
   const warningZone = countdown.remaining <= 10 && countdown.remaining > 0;
 
-  const handleStartSegment = () => {
-    if (!currentSeg) return;
-    const totalSec = (parseInt(currentSeg.durationMinutes) || 1) * 60;
-    setStarted(true);
+  // Keep screen awake while cardio is active
+  useEffect(() => {
+    if (sessionStarted) {
+      activateKeepAwakeAsync("cardio-timer");
+    }
+    return () => {
+      deactivateKeepAwake("cardio-timer");
+    };
+  }, [sessionStarted]);
+
+  // Track scheduled notification IDs so we can cancel on early exit
+  const scheduledNotifIds = useRef<string[]>([]);
+
+  // Start a specific segment's countdown and auto-chain to the next one
+  const kickOffSegment = (idx: number) => {
+    const seg = segments[idx];
+    if (!seg) return;
+    setCurrentSegIdx(idx);
+    const totalSec = Math.round((parseFloat(seg.durationMinutes) || 1) * 60);
+
+    // Schedule notifications ahead of time so they fire even if app is backgrounded
+    // 1) "10 seconds remaining" warning (only if segment is longer than 15 sec)
+    if (totalSec > 15) {
+      scheduleNotification(
+        "⏱ 10 seconds remaining",
+        `Segment ${idx + 1} is about to end`,
+        totalSec - 10,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    }
+
+    // 2) Segment-end notification
+    const nextIdx = idx + 1;
+    if (nextIdx < segments.length) {
+      const next = segments[nextIdx];
+      scheduleNotification(
+        `Segment ${nextIdx + 1} starting`,
+        `${next.durationMinutes} min${isTreadmill ? ` · ${next.speed || "—"} mph · ${next.incline || "0"}%` : ""}`,
+        totalSec,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    } else {
+      scheduleNotification(
+        "Cardio Complete 🎉",
+        "All segments finished!",
+        totalSec,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    }
+
     countdown.startCountdown(totalSec, () => {
-      // Mark segment done
       const updated = [...segmentsDone];
-      updated[currentSegIdx] = true;
+      updated[idx] = true;
       setSegmentsDone(updated);
-      // Auto advance
-      if (currentSegIdx < segments.length - 1) {
-        setCurrentSegIdx(currentSegIdx + 1);
-        setStarted(false);
+      if (nextIdx < segments.length) {
+        kickOffSegment(nextIdx);
       }
     });
   };
+
+  const handleStartSession = () => {
+    requestNotificationPermission();
+    setSessionStarted(true);
+    scheduledNotifIds.current = [];
+    kickOffSegment(0);
+  };
+
+  // Cancel all scheduled notifications on unmount / close
+  useEffect(() => {
+    return () => {
+      scheduledNotifIds.current.forEach(cancelScheduledNotification);
+      scheduledNotifIds.current = [];
+    };
+  }, []);
 
   if (!routine.hasCardio || segments.length === 0) {
     return (
@@ -541,26 +679,44 @@ function CardioPhase({
         {segments.length} segment{segments.length > 1 ? "s" : ""}
       </Text>
 
+      {/* Single START button before session begins */}
+      {!sessionStarted && (
+        <TouchableOpacity style={p.startBtn} onPress={handleStartSession}>
+          <MaterialIcons name="play-arrow" size={20} color={WHITE} />
+          <Text style={p.startBtnText}>START CARDIO</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Global pause / resume once session is running */}
+      {sessionStarted && !allDone && (
+        <View style={{ alignItems: "center", marginBottom: 16 }}>
+          {countdown.running ? (
+            <TouchableOpacity style={p.pauseBtn} onPress={countdown.pause}>
+              <MaterialIcons name="pause" size={18} color={WHITE} />
+              <Text style={p.pauseBtnText}>PAUSE</Text>
+            </TouchableOpacity>
+          ) : countdown.remaining > 0 ? (
+            <TouchableOpacity style={p.startBtn} onPress={countdown.resume}>
+              <MaterialIcons name="play-arrow" size={18} color={WHITE} />
+              <Text style={p.startBtnText}>RESUME</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      )}
+
       {/* Segment list */}
       {segments.map((seg, idx) => {
-        const isCurrent = idx === currentSegIdx;
+        const isCurrent = idx === currentSegIdx && sessionStarted;
         const isDone = segmentsDone[idx];
 
         return (
-          <TouchableOpacity
+          <View
             key={seg.id}
             style={[
               p.segmentCard,
               isCurrent && p.segmentCardActive,
               isDone && p.segmentCardDone,
             ]}
-            onPress={() => {
-              if (!isDone && !countdown.running) {
-                setCurrentSegIdx(idx);
-                setStarted(false);
-              }
-            }}
-            activeOpacity={0.7}
           >
             <View style={p.segmentHeader}>
               <View
@@ -584,55 +740,25 @@ function CardioPhase({
                   </Text>
                 )}
               </View>
-              {isCurrent && started && countdown.running && (
+              {isCurrent && !isDone && (
                 <Text style={[p.segCountdown, warningZone && { color: RED }]}>
                   {formatTime(countdown.remaining)}
                 </Text>
               )}
             </View>
 
-            {/* Current segment controls */}
-            {isCurrent && !isDone && (
-              <View style={p.segControls}>
-                {!started ? (
-                  <TouchableOpacity
-                    style={p.startBtn}
-                    onPress={handleStartSegment}
-                  >
-                    <MaterialIcons name="play-arrow" size={18} color={WHITE} />
-                    <Text style={p.startBtnText}>START</Text>
-                  </TouchableOpacity>
-                ) : countdown.running ? (
-                  <TouchableOpacity
-                    style={p.pauseBtn}
-                    onPress={countdown.pause}
-                  >
-                    <MaterialIcons name="pause" size={18} color={WHITE} />
-                    <Text style={p.pauseBtnText}>PAUSE</Text>
-                  </TouchableOpacity>
-                ) : countdown.remaining > 0 ? (
-                  <TouchableOpacity
-                    style={p.startBtn}
-                    onPress={countdown.resume}
-                  >
-                    <MaterialIcons name="play-arrow" size={18} color={WHITE} />
-                    <Text style={p.startBtnText}>RESUME</Text>
-                  </TouchableOpacity>
-                ) : null}
-
-                {warningZone && (
-                  <View style={p.warningBanner}>
-                    <MaterialIcons
-                      name="notifications-active"
-                      size={16}
-                      color={YELLOW}
-                    />
-                    <Text style={p.warningText}>10 seconds remaining!</Text>
-                  </View>
-                )}
+            {/* Warning banner for current segment */}
+            {isCurrent && !isDone && warningZone && (
+              <View style={p.warningBanner}>
+                <MaterialIcons
+                  name="notifications-active"
+                  size={16}
+                  color={YELLOW}
+                />
+                <Text style={p.warningText}>Changing segment soon!</Text>
               </View>
             )}
-          </TouchableOpacity>
+          </View>
         );
       })}
 

@@ -1,33 +1,42 @@
 # dependencies
+
 node_modules/
 
 # Expo
+
 .expo/
 dist/
 web-build/
 
 # Native build artifacts (EAS generates these fresh)
+
 /ios
 /android
 
 # macOS
+
 .DS_Store
-*.pem
+\*.pem
 
 # local env files
-.env*.local
+
+.env\*.local
 .env
 
 # debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
+
+npm-debug._
+yarn-debug._
+yarn-error.\*
 
 # typescript
-*.tsbuildinfo
+
+\*.tsbuildinfo
 
 # git
+
 .git
 
 # misc
+
 app-example

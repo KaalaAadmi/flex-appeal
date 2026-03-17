@@ -17,7 +17,8 @@
  */
 
 import { Platform } from "react-native";
-import { syncHealthData } from "./api";
+import { syncHealthData, getMe, updateMe } from "./api";
+import * as SecureStore from "expo-secure-store";
 
 // We import only the *type* at the top level (zero runtime cost).
 import type { QuantityTypeIdentifier } from "@kingstinct/react-native-healthkit";
@@ -60,6 +61,7 @@ const QTY = {
     "HKQuantityTypeIdentifierBasalEnergyBurned" as QuantityTypeIdentifier,
   steps: "HKQuantityTypeIdentifierStepCount" as QuantityTypeIdentifier,
   bodyMass: "HKQuantityTypeIdentifierBodyMass" as QuantityTypeIdentifier,
+  height: "HKQuantityTypeIdentifierHeight" as QuantityTypeIdentifier,
   dietaryEnergy:
     "HKQuantityTypeIdentifierDietaryEnergyConsumed" as QuantityTypeIdentifier,
   protein: "HKQuantityTypeIdentifierDietaryProtein" as QuantityTypeIdentifier,
@@ -70,7 +72,16 @@ const QTY = {
     "HKQuantityTypeIdentifierDistanceWalkingRunning" as QuantityTypeIdentifier,
 } as const;
 
-const READ_TYPES = Object.values(QTY) as readonly QuantityTypeIdentifier[];
+/** Characteristic types (date of birth, biological sex) */
+const CHAR_TYPES = [
+  "HKCharacteristicTypeIdentifierDateOfBirth",
+  "HKCharacteristicTypeIdentifierBiologicalSex",
+] as const;
+
+const READ_TYPES = [
+  ...Object.values(QTY),
+  ...CHAR_TYPES,
+] as readonly string[] as readonly QuantityTypeIdentifier[];
 
 /**
  * Initialize HealthKit and request permissions.
@@ -323,5 +334,259 @@ export async function getCumulativeActiveCalories(): Promise<number | null> {
   } catch (err) {
     console.warn("[HealthKit] getCumulativeActiveCalories error:", err);
     return null;
+  }
+}
+
+// ─── User Details Sync from HealthKit ────────────────
+
+const HEALTH_DETAILS_SYNC_KEY = "healthkit_details_last_sync";
+
+interface HealthKitUserDetails {
+  heightCm?: number | null;
+  weightKg?: number | null;
+  age?: number | null;
+  gender?: string | null;
+}
+
+/**
+ * Map HealthKit BiologicalSex enum to our gender string.
+ * BiologicalSex: notSet=0, female=1, male=2, other=3
+ */
+function biologicalSexToGender(sex: number): string | null {
+  switch (sex) {
+    case 1:
+      return "Female";
+    case 2:
+      return "Male";
+    case 3:
+      return "Other";
+    default:
+      return null; // notSet
+  }
+}
+
+/**
+ * Read user characteristics & most-recent body measurements from HealthKit.
+ * Returns height (cm), weight (kg), age (computed from DOB), and gender.
+ */
+export async function getUserDetailsFromHealthKit(): Promise<HealthKitUserDetails> {
+  if (Platform.OS !== "ios") return {};
+
+  const HK = getHK();
+  if (!HK) return {};
+
+  const details: HealthKitUserDetails = {};
+
+  try {
+    // Biological Sex
+    const sex = await HK.getBiologicalSex();
+    details.gender = biologicalSexToGender(sex);
+  } catch {
+    /* user may not have granted this permission */
+  }
+
+  try {
+    // Date of Birth → age
+    const dob = await HK.getDateOfBirth();
+    if (dob) {
+      const birthDate = new Date(dob);
+      const today = new Date();
+      let ageYears = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+      if (
+        monthDiff < 0 ||
+        (monthDiff === 0 && today.getDate() < birthDate.getDate())
+      ) {
+        ageYears--;
+      }
+      if (ageYears > 0 && ageYears < 150) {
+        details.age = ageYears;
+      }
+    }
+  } catch {
+    /* user may not have set DOB */
+  }
+
+  try {
+    // Height (most recent sample, in meters → convert to cm)
+    const heightSample = await HK.getMostRecentQuantitySample(QTY.height);
+    if (heightSample && heightSample.quantity > 0) {
+      // HealthKit returns height in meters by default
+      details.heightCm = Math.round(heightSample.quantity * 100);
+    }
+  } catch {
+    /* no height data */
+  }
+
+  try {
+    // Body Mass (most recent sample, in kg)
+    const weightSample = await HK.getMostRecentQuantitySample(QTY.bodyMass);
+    if (weightSample && weightSample.quantity > 0) {
+      details.weightKg = Math.round(weightSample.quantity * 10) / 10;
+    }
+  } catch {
+    /* no weight data */
+  }
+
+  return details;
+}
+
+/**
+ * Sync user details from HealthKit to the backend profile.
+ * Only updates fields that have changed (non-null HealthKit values override blanks;
+ * non-null HealthKit values also override existing DB values if different).
+ *
+ * Returns true if an update was sent, false if nothing changed.
+ */
+export async function syncUserDetailsFromHealthKit(): Promise<boolean> {
+  if (Platform.OS !== "ios") return false;
+
+  try {
+    const hkDetails = await getUserDetailsFromHealthKit();
+
+    // Nothing came back from HealthKit
+    const hasAny =
+      hkDetails.heightCm != null ||
+      hkDetails.weightKg != null ||
+      hkDetails.age != null ||
+      hkDetails.gender != null;
+    if (!hasAny) return false;
+
+    // Fetch current profile from backend
+    const res = await getMe();
+    if (!res.ok) return false;
+    const userData = await res.json();
+    const profile = userData.profile || {};
+
+    // Build update payload — only include fields that actually changed
+    const profileUpdate: Record<string, unknown> = {};
+    let changed = false;
+
+    if (hkDetails.heightCm != null && hkDetails.heightCm !== profile.heightCm) {
+      profileUpdate.heightCm = hkDetails.heightCm;
+      changed = true;
+    }
+    if (hkDetails.weightKg != null && hkDetails.weightKg !== profile.weightKg) {
+      profileUpdate.weightKg = hkDetails.weightKg;
+      changed = true;
+    }
+    if (hkDetails.age != null && hkDetails.age !== profile.age) {
+      profileUpdate.age = hkDetails.age;
+      changed = true;
+    }
+    if (hkDetails.gender != null && hkDetails.gender !== profile.gender) {
+      profileUpdate.gender = hkDetails.gender;
+      changed = true;
+    }
+
+    if (!changed) return false;
+
+    // Send PATCH to backend
+    const updateRes = await updateMe({ profile: profileUpdate });
+    if (updateRes.ok) {
+      console.log(
+        "[HealthKit] User details synced:",
+        JSON.stringify(profileUpdate),
+      );
+    }
+    return updateRes.ok;
+  } catch (err) {
+    console.warn("[HealthKit] syncUserDetailsFromHealthKit error:", err);
+    return false;
+  }
+}
+
+/**
+ * Check if a daily sync of user details is due, and perform it if so.
+ * Stores the last sync date in SecureStore so it runs at most once per day.
+ * Also runs on first launch (no stored date).
+ */
+export async function maybeSyncUserDetailsDaily(): Promise<void> {
+  if (Platform.OS !== "ios") return;
+
+  try {
+    const todayStr = new Date().toISOString().split("T")[0]; // "YYYY-MM-DD"
+    const lastSync = await SecureStore.getItemAsync(HEALTH_DETAILS_SYNC_KEY);
+
+    if (lastSync === todayStr) return; // already synced today
+
+    const didSync = await syncUserDetailsFromHealthKit();
+    if (didSync) {
+      await SecureStore.setItemAsync(HEALTH_DETAILS_SYNC_KEY, todayStr);
+      console.log("[HealthKit] Daily user details sync complete for", todayStr);
+    } else {
+      // Even if nothing changed, mark as synced so we don't retry every focus
+      await SecureStore.setItemAsync(HEALTH_DETAILS_SYNC_KEY, todayStr);
+    }
+  } catch (err) {
+    console.warn("[HealthKit] maybeSyncUserDetailsDaily error:", err);
+  }
+}
+
+// ─── App-open Health Data Sync ───────────────────────
+
+const HEALTH_DATA_SYNC_KEY = "healthkit_data_last_sync";
+
+/**
+ * Sync recent health data (last 7 days) from HealthKit to the backend
+ * every time the app is opened, but throttle to at most once per 30 minutes
+ * to avoid hammering the API on rapid tab switches.
+ */
+export async function syncHealthDataOnAppOpen(): Promise<void> {
+  if (Platform.OS !== "ios") return;
+
+  try {
+    const now = Date.now();
+    const lastSync = await SecureStore.getItemAsync(HEALTH_DATA_SYNC_KEY);
+    const lastSyncMs = lastSync ? parseInt(lastSync, 10) : 0;
+
+    // Throttle: skip if synced less than 30 min ago
+    if (now - lastSyncMs < 30 * 60 * 1000) return;
+
+    // Check if Apple Health was ever connected by seeing if the HK module loads
+    const HK = getHK();
+    if (!HK) return;
+
+    console.log("[HealthKit] App-open sync: fetching last 7 days…");
+    const result = await fetchAndSyncHealthData(7);
+    console.log("[HealthKit] App-open sync complete:", result.synced, "days");
+
+    await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(now));
+  } catch (err) {
+    console.warn("[HealthKit] syncHealthDataOnAppOpen error:", err);
+  }
+}
+
+// ─── Background Fetch Task ──────────────────────────
+
+export const BACKGROUND_HEALTH_SYNC_TASK = "background-health-sync";
+
+/**
+ * The function that runs as a background fetch task.
+ * Syncs the last 2 days of health data + user details.
+ * Returns BackgroundFetch result codes (use the constants from the caller).
+ */
+export async function runBackgroundHealthSync(): Promise<number> {
+  if (Platform.OS !== "ios") return 3; // BackgroundFetch.BackgroundFetchResult.NoData
+
+  try {
+    const HK = getHK();
+    if (!HK) return 3; // NoData
+
+    console.log("[HealthKit] Background sync: fetching last 2 days…");
+    const result = await fetchAndSyncHealthData(2);
+
+    // Also sync user details
+    await syncUserDetailsFromHealthKit();
+
+    console.log("[HealthKit] Background sync complete:", result.synced, "days");
+
+    // Store timestamp
+    await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(Date.now()));
+
+    return result.synced > 0 ? 2 : 3; // NewData : NoData
+  } catch (err) {
+    console.warn("[HealthKit] Background sync error:", err);
+    return 1; // Failed
   }
 }

@@ -24,6 +24,8 @@ const SUBTLE_TEXT = "#888";
 const WHITE = "#FFFFFF";
 const TAG_BG = "#2A2A2A";
 const RED = "#E74C3C";
+const GREEN = "#2ECC71";
+const BORDER_COLOR = "#333";
 
 function formatDate(isoDate: string): string {
   const date = new Date(isoDate);
@@ -169,6 +171,8 @@ export default function WorkoutDetailScreen() {
               totalWeightUnit: "kg",
               prs: data.stats?.prs || 0,
             },
+            cardio: data.cardio || null,
+            warmup: data.warmup || null,
           };
           setWorkout(normalized);
         }
@@ -280,6 +284,8 @@ export default function WorkoutDetailScreen() {
             totalWeightUnit: "kg",
             prs: data.stats?.prs || 0,
           },
+          cardio: data.cardio || workout.cardio || null,
+          warmup: data.warmup || workout.warmup || null,
         });
         setIsEditing(false);
         Alert.alert("Success", "Workout updated successfully.");
@@ -540,6 +546,56 @@ export default function WorkoutDetailScreen() {
             : workout.exercises.map((exercise) => (
                 <ExerciseCard key={exercise.id} exercise={exercise} />
               ))}
+
+          {/* Cardio Section */}
+          {workout.cardio &&
+            workout.cardio.segments &&
+            workout.cardio.segments.length > 0 && (
+              <View style={{ marginTop: 8, marginBottom: 16 }}>
+                <Text style={styles.sectionTitle}>
+                  <MaterialIcons
+                    name="directions-run"
+                    size={18}
+                    color={ORANGE}
+                  />{" "}
+                  {workout.cardio.type} Cardio
+                </Text>
+                {workout.cardio.segments.map((seg, idx) => (
+                  <View key={idx} style={styles.cardioSegmentCard}>
+                    <View style={styles.cardioSegmentHeader}>
+                      <View
+                        style={[
+                          styles.cardioSegmentBadge,
+                          seg.completed && { backgroundColor: GREEN },
+                        ]}
+                      >
+                        {seg.completed ? (
+                          <MaterialIcons name="check" size={14} color={WHITE} />
+                        ) : (
+                          <Text style={styles.cardioSegmentBadgeText}>
+                            {idx + 1}
+                          </Text>
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.cardioSegmentDuration}>
+                          {seg.durationMinutes} min
+                        </Text>
+                        <Text style={styles.cardioSegmentDetail}>
+                          {seg.speed ? `Speed ${seg.speed}` : ""}
+                          {seg.speed && seg.incline ? " · " : ""}
+                          {seg.incline ? `Incline ${seg.incline}%` : ""}
+                          {!seg.speed && !seg.incline ? "—" : ""}
+                        </Text>
+                      </View>
+                      {seg.completed && (
+                        <Text style={styles.cardioCompletedLabel}>Done</Text>
+                      )}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
 
           {/* Delete button at bottom (view mode only) */}
           {!isEditing && (
@@ -816,5 +872,48 @@ const styles = StyleSheet.create({
     color: SUBTLE_TEXT,
     fontSize: 12,
     fontWeight: "600",
+  },
+
+  // Cardio section
+  cardioSegmentCard: {
+    backgroundColor: CARD_BG,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: BORDER_COLOR,
+  },
+  cardioSegmentHeader: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 12,
+  },
+  cardioSegmentBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: ORANGE,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+  },
+  cardioSegmentBadgeText: {
+    color: WHITE,
+    fontSize: 12,
+    fontWeight: "bold" as const,
+  },
+  cardioSegmentDuration: {
+    color: WHITE,
+    fontSize: 15,
+    fontWeight: "bold" as const,
+  },
+  cardioSegmentDetail: {
+    color: SUBTLE_TEXT,
+    fontSize: 12,
+    marginTop: 1,
+  },
+  cardioCompletedLabel: {
+    color: GREEN,
+    fontSize: 12,
+    fontWeight: "600" as const,
   },
 });

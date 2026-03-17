@@ -12,6 +12,7 @@ import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useState, useCallback } from "react";
 import { useFocusEffect } from "@react-navigation/native";
 import { getDeficitData, getProgression, getPlateaus } from "@/services/api";
+import { syncHealthDataOnAppOpen } from "@/services/health";
 
 const ORANGE = "#E8651A";
 const DARK_BG = "#0D0D0D";
@@ -279,10 +280,12 @@ const barStyles = StyleSheet.create({
 function DeficitTooltip({
   entry,
   period,
+  goalType,
   onClose,
 }: {
   entry: DeficitEntry;
   period: DeficitPeriod;
+  goalType: string | null;
   onClose: () => void;
 }) {
   const dateDisplay =
@@ -293,6 +296,11 @@ function DeficitTooltip({
           ? `${formatFullDate(entry.startDate)} – ${formatFullDate(entry.endDate)}`
           : entry.label || ""
         : formatMonthLabel(entry.label || entry.date);
+
+  // Estimated fat loss for weekly view when user goal is fat loss (cut)
+  const showEstFatLoss =
+    period === "weekly" && goalType === "cut" && entry.deficit > 0;
+  const estFatLossKg = showEstFatLoss ? entry.deficit / 7700 : 0;
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -361,6 +369,19 @@ function DeficitTooltip({
             </Text>
           )}
 
+          {showEstFatLoss && (
+            <View style={tooltipStyles.fatLossRow}>
+              <Text style={tooltipStyles.fatLossLabel}>🔥 Est. Fat Loss</Text>
+              <Text style={[tooltipStyles.fatLossValue, { color: GREEN }]}>
+                {estFatLossKg.toFixed(2)} kg
+              </Text>
+              <Text style={tooltipStyles.fatLossFormula}>
+                {Math.round(entry.deficit).toLocaleString()} kcal ÷ 7,700
+                kcal/kg
+              </Text>
+            </View>
+          )}
+
           <TouchableOpacity style={tooltipStyles.closeBtn} onPress={onClose}>
             <Text style={tooltipStyles.closeBtnText}>Close</Text>
           </TouchableOpacity>
@@ -421,6 +442,31 @@ const tooltipStyles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
     marginBottom: 8,
+  },
+  fatLossRow: {
+    alignItems: "center",
+    backgroundColor: GREEN + "10",
+    borderWidth: 1,
+    borderColor: GREEN + "30",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  fatLossLabel: {
+    color: WHITE,
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 2,
+  },
+  fatLossValue: {
+    fontSize: 22,
+    fontWeight: "bold",
+    marginBottom: 2,
+  },
+  fatLossFormula: {
+    color: SUBTLE_TEXT,
+    fontSize: 10,
   },
   closeBtn: {
     marginTop: 8,
@@ -717,11 +763,16 @@ export default function InsightsScreen() {
   useFocusEffect(
     useCallback(() => {
       setInitialLoading(true);
-      Promise.all([
-        fetchDeficit(deficitPeriod),
-        fetchProgression(progressionWeeks),
-        fetchPlateaus(),
-      ]).finally(() => setInitialLoading(false));
+      // Sync latest health data from HealthKit, then fetch insights
+      syncHealthDataOnAppOpen()
+        .catch(() => {})
+        .finally(() =>
+          Promise.all([
+            fetchDeficit(deficitPeriod),
+            fetchProgression(progressionWeeks),
+            fetchPlateaus(),
+          ]).finally(() => setInitialLoading(false)),
+        );
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [fetchDeficit, fetchProgression, fetchPlateaus]),
   );
@@ -1246,6 +1297,7 @@ export default function InsightsScreen() {
         <DeficitTooltip
           entry={deficitData[selectedDeficitIdx]}
           period={deficitPeriod}
+          goalType={goalType}
           onClose={() => setSelectedDeficitIdx(null)}
         />
       )}

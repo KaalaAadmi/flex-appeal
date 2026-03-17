@@ -1,2 +1,4 @@
 packages:
-  - "."
+  - .
+patchedDependencies:
+  expo-task-manager@55.0.9: patches/expo-task-manager@55.0.9.patch

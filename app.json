@@ -59,7 +59,14 @@
           "NSHealthShareUsageDescription": "Flex Appeal needs access to your Health data to track calories burned, steps, body measurements, and nutrition data for deficit calculations.",
           "NSHealthUpdateUsageDescription": "Flex Appeal can write workout data to Apple Health."
         }
-      ]
+      ],
+      [
+        "expo-notifications",
+        {
+          "sounds": ["./assets/sounds/tone.mp3"]
+        }
+      ],
+      "expo-background-fetch"
     ],
     "experiments": {
       "typedRoutes": true,

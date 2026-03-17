@@ -15,6 +15,24 @@ export interface Exercise {
   tags?: string[];
 }
 
+export interface WorkoutCardioSegment {
+  durationMinutes: number;
+  speed?: number;
+  incline?: number;
+  completed: boolean;
+}
+
+export interface WorkoutCardio {
+  type: string;
+  segments: WorkoutCardioSegment[];
+}
+
+export interface WorkoutWarmup {
+  type: string;
+  durationMinutes: number;
+  completed: boolean;
+}
+
 export interface Workout {
   id: string;
   title: string;
@@ -31,6 +49,8 @@ export interface Workout {
     prs?: number;
   };
   exerciseNames: string[];
+  cardio?: WorkoutCardio | null;
+  warmup?: WorkoutWarmup | null;
 }
 
 export const mockWorkouts: Workout[] = [

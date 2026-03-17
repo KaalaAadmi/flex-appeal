@@ -16,8 +16,16 @@ import {
 } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Audio } from "expo-av";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import * as Notifications from "expo-notifications";
 import { ExerciseCatalogItem } from "@/data/exercise-catalog";
-import { DAYS_OF_WEEK, DayOfWeek } from "@/data/routine-types";
+import {
+  DAYS_OF_WEEK,
+  DayOfWeek,
+  CardioSegment,
+  CardioType,
+} from "@/data/routine-types";
 import {
   createWorkout,
   getExercises,
@@ -32,7 +40,184 @@ const CARD_BG = "#1A1A1A";
 const INPUT_BG = "#2A2019";
 const SUBTLE_TEXT = "#888";
 const WHITE = "#FFFFFF";
+const GREEN = "#2ECC71";
+const RED = "#E74C3C";
+const YELLOW = "#F39C12";
 const BORDER_COLOR = "#333";
+
+// Custom tone, bundled asset (user-provided mp3)
+const TONE_ASSET = require("@/assets/sounds/tone.mp3");
+
+// ─── Notification helper ───────────────────────────────
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
+
+async function requestNotificationPermission() {
+  const { status } = await Notifications.getPermissionsAsync();
+  if (status !== "granted") {
+    await Notifications.requestPermissionsAsync();
+  }
+}
+
+/**
+ * Schedule a notification to fire after `delaySec` seconds.
+ * When delaySec === 0, fires immediately (trigger: null).
+ * Returns the notification identifier so it can be cancelled.
+ */
+async function scheduleNotification(
+  title: string,
+  body: string,
+  delaySec: number = 0,
+): Promise<string> {
+  return Notifications.scheduleNotificationAsync({
+    content: { title, body, sound: "tone.mp3" },
+    trigger:
+      delaySec > 0
+        ? {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: delaySec,
+            repeats: false,
+          }
+        : null,
+  });
+}
+
+/**
+ * Cancel a previously scheduled notification by its identifier.
+ */
+async function cancelScheduledNotification(id: string) {
+  try {
+    await Notifications.cancelScheduledNotificationAsync(id);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ─── Countdown Timer Hook (for cardio segments) ──────
+// Uses wall-clock time (Date.now) so it keeps ticking when the app is backgrounded.
+
+function useCountdown() {
+  const [remaining, setRemaining] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [bellRung, setBellRung] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const endAtRef = useRef<number>(0); // wall-clock ms when countdown hits 0
+  const onCompleteRef = useRef<(() => void) | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  const playTone = async () => {
+    try {
+      // Duck other audio (e.g. music) so the tone stands out
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        interruptionModeIOS: 2, // InterruptionModeIOS.DuckOthers
+        shouldDuckAndroid: true,
+        interruptionModeAndroid: 2, // InterruptionModeAndroid.DuckOthers
+      });
+      const { sound } = await Audio.Sound.createAsync(TONE_ASSET, {
+        shouldPlay: false,
+        volume: 0.8,
+        isLooping: false,
+      });
+      soundRef.current = sound;
+      await sound.playAsync();
+      // Auto-unload after playback, then restore audio mode so other apps resume
+      setTimeout(async () => {
+        try {
+          await sound.stopAsync();
+          await sound.unloadAsync();
+          soundRef.current = null;
+          // Restore mixing so the user's music returns to full volume
+          await Audio.setAudioModeAsync({
+            playsInSilentModeIOS: true,
+            staysActiveInBackground: true,
+            interruptionModeIOS: 1, // InterruptionModeIOS.MixWithOthers
+            shouldDuckAndroid: false,
+            interruptionModeAndroid: 1, // InterruptionModeAndroid.DoNotMix → actually MixWithOthers = 1
+          });
+        } catch {
+          /* ignore */
+        }
+      }, 1200);
+    } catch (err) {
+      console.warn("Could not play countdown tone:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (running) {
+      intervalRef.current = setInterval(() => {
+        const now = Date.now();
+        const left = Math.max(0, Math.ceil((endAtRef.current - now) / 1000));
+        setRemaining(left);
+
+        if (left <= 10 && left > 0 && !bellRung) {
+          playTone();
+          setBellRung(true);
+        }
+
+        if (left <= 0) {
+          setRunning(false);
+          if (onCompleteRef.current) onCompleteRef.current();
+        }
+      }, 250); // poll 4× / sec for snappy UI after un-backgrounding
+    } else if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [running, bellRung]);
+
+  useEffect(() => {
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.stopAsync().catch(() => {});
+        soundRef.current.unloadAsync().catch(() => {});
+      }
+    };
+  }, []);
+
+  const startCountdown = (totalSeconds: number, onComplete: () => void) => {
+    endAtRef.current = Date.now() + totalSeconds * 1000;
+    setRemaining(totalSeconds);
+    setBellRung(false);
+    onCompleteRef.current = onComplete;
+    setRunning(true);
+  };
+
+  const pause = () => {
+    // Freeze the remaining time so we can resume later
+    const now = Date.now();
+    const left = Math.max(0, Math.ceil((endAtRef.current - now) / 1000));
+    setRemaining(left);
+    setRunning(false);
+  };
+
+  const resume = () => {
+    // Re-anchor end time from current remaining
+    endAtRef.current = Date.now() + remaining * 1000;
+    setRunning(true);
+  };
+
+  return { remaining, running, startCountdown, pause, resume };
+}
+
+function formatCountdown(totalSeconds: number): string {
+  const mins = Math.floor(totalSeconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const secs = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${mins}:${secs}`;
+}
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -393,7 +578,416 @@ function TrackingExerciseCard({
   );
 }
 
-// ─── Main Screen ────────────────────────────────────────
+// ─── Main Screen ────────────────────────────────────
+
+// ─── Cardio Timer Modal ─────────────────────────────
+
+function CardioTimerModal({
+  visible,
+  onClose,
+  cardioType,
+  segments,
+  completedSegments,
+  onSegmentComplete,
+  onFinish,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  cardioType?: CardioType;
+  segments: CardioSegment[];
+  completedSegments: boolean[];
+  onSegmentComplete: (idx: number) => void;
+  onFinish: () => void;
+}) {
+  const [currentSegIdx, setCurrentSegIdx] = useState(0);
+  const [sessionStarted, setSessionStarted] = useState(false);
+  const countdown = useCountdown();
+
+  const isTreadmill = cardioType === "Treadmill";
+  const allDone = completedSegments.every(Boolean);
+  const warningZone = countdown.remaining <= 10 && countdown.remaining > 0;
+
+  // Reset state when modal opens
+  useEffect(() => {
+    if (visible) {
+      setCurrentSegIdx(0);
+      setSessionStarted(false);
+    }
+  }, [visible]);
+
+  // Keep screen awake while cardio is active, release on unmount/close
+  useEffect(() => {
+    if (sessionStarted && visible) {
+      activateKeepAwakeAsync("cardio-timer");
+    }
+    return () => {
+      deactivateKeepAwake("cardio-timer");
+    };
+  }, [sessionStarted, visible]);
+
+  // Track scheduled notification IDs so we can cancel on early exit
+  const scheduledNotifIds = useRef<string[]>([]);
+
+  // Start a specific segment's countdown and auto-chain to the next one
+  const kickOffSegment = (idx: number) => {
+    const seg = segments[idx];
+    if (!seg) return;
+    setCurrentSegIdx(idx);
+    const totalSec = Math.round((parseFloat(seg.durationMinutes) || 1) * 60);
+
+    // Schedule notifications ahead of time so they fire even if app is backgrounded
+    // 1) "10 seconds remaining" warning (only if segment is longer than 15 sec)
+    if (totalSec > 15) {
+      scheduleNotification(
+        "⏱ 10 seconds remaining",
+        `Segment ${idx + 1} is about to end`,
+        totalSec - 10,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    }
+
+    // 2) Segment-end notification
+    const nextIdx = idx + 1;
+    if (nextIdx < segments.length) {
+      const next = segments[nextIdx];
+      scheduleNotification(
+        `Segment ${nextIdx + 1} starting`,
+        `${next.durationMinutes} min${isTreadmill ? ` · ${next.speed || "—"} mph · ${next.incline || "0"}%` : ""}`,
+        totalSec,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    } else {
+      scheduleNotification(
+        "Cardio Complete 🎉",
+        "All segments finished!",
+        totalSec,
+      ).then((id) => scheduledNotifIds.current.push(id));
+    }
+
+    countdown.startCountdown(totalSec, () => {
+      onSegmentComplete(idx);
+      if (nextIdx < segments.length) {
+        kickOffSegment(nextIdx);
+      }
+    });
+  };
+
+  // Single START for the whole session
+  const handleStartSession = () => {
+    requestNotificationPermission();
+    setSessionStarted(true);
+    scheduledNotifIds.current = [];
+    kickOffSegment(0);
+  };
+
+  // Cancel all scheduled notifications on unmount / close
+  useEffect(() => {
+    return () => {
+      scheduledNotifIds.current.forEach(cancelScheduledNotification);
+      scheduledNotifIds.current = [];
+    };
+  }, []);
+
+  if (segments.length === 0) return null;
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="fullScreen"
+    >
+      <SafeAreaView style={cardioStyles.container}>
+        {/* Header */}
+        <View style={cardioStyles.header}>
+          <TouchableOpacity
+            onPress={() => {
+              if (countdown.running) {
+                Alert.alert(
+                  "Leave Cardio?",
+                  "Timer is still running. Are you sure?",
+                  [
+                    { text: "Stay", style: "cancel" },
+                    {
+                      text: "Leave",
+                      style: "destructive",
+                      onPress: onClose,
+                    },
+                  ],
+                );
+              } else {
+                onClose();
+              }
+            }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <MaterialIcons name="arrow-back" size={24} color={WHITE} />
+          </TouchableOpacity>
+          <Text style={cardioStyles.headerTitle}>
+            {cardioType || "Cardio"} Session
+          </Text>
+          <View style={{ width: 24 }} />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={{ padding: 20, paddingBottom: 80 }}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Title area */}
+          <View style={cardioStyles.titleArea}>
+            <View style={cardioStyles.iconCircle}>
+              <MaterialIcons name="directions-run" size={40} color={ORANGE} />
+            </View>
+            <Text style={cardioStyles.title}>{cardioType} Cardio</Text>
+            <Text style={cardioStyles.subtitle}>
+              {segments.length} segment{segments.length > 1 ? "s" : ""}
+            </Text>
+          </View>
+
+          {/* Single START button before session begins */}
+          {!sessionStarted && (
+            <TouchableOpacity
+              style={cardioStyles.startBtn}
+              onPress={handleStartSession}
+            >
+              <MaterialIcons name="play-arrow" size={20} color={WHITE} />
+              <Text style={cardioStyles.startBtnText}>START CARDIO</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Global pause / resume once session is running */}
+          {sessionStarted && !allDone && (
+            <View style={{ alignItems: "center", marginBottom: 16 }}>
+              {countdown.running ? (
+                <TouchableOpacity
+                  style={cardioStyles.pauseBtn}
+                  onPress={countdown.pause}
+                >
+                  <MaterialIcons name="pause" size={18} color={WHITE} />
+                  <Text style={cardioStyles.pauseBtnText}>PAUSE</Text>
+                </TouchableOpacity>
+              ) : countdown.remaining > 0 ? (
+                <TouchableOpacity
+                  style={cardioStyles.startBtn}
+                  onPress={countdown.resume}
+                >
+                  <MaterialIcons name="play-arrow" size={18} color={WHITE} />
+                  <Text style={cardioStyles.startBtnText}>RESUME</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          )}
+
+          {/* Segment list */}
+          {segments.map((seg, idx) => {
+            const isCurrent = idx === currentSegIdx && sessionStarted;
+            const isDone = completedSegments[idx];
+
+            return (
+              <View
+                key={seg.id}
+                style={[
+                  cardioStyles.segmentCard,
+                  isCurrent && cardioStyles.segmentCardActive,
+                  isDone && cardioStyles.segmentCardDone,
+                ]}
+              >
+                <View style={cardioStyles.segmentHeader}>
+                  <View
+                    style={[
+                      cardioStyles.segmentBadge,
+                      isDone && { backgroundColor: GREEN },
+                    ]}
+                  >
+                    {isDone ? (
+                      <MaterialIcons name="check" size={14} color={WHITE} />
+                    ) : (
+                      <Text style={cardioStyles.segmentBadgeText}>
+                        {idx + 1}
+                      </Text>
+                    )}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={cardioStyles.segmentDuration}>
+                      {seg.durationMinutes} min
+                    </Text>
+                    {isTreadmill ? (
+                      <Text style={cardioStyles.segmentDetail}>
+                        Speed {seg.speed} · Incline {seg.incline}%
+                      </Text>
+                    ) : (
+                      <Text style={cardioStyles.segmentDetail}>
+                        Resistance {seg.resistance}
+                      </Text>
+                    )}
+                  </View>
+                  {isCurrent && !isDone && (
+                    <Text
+                      style={[
+                        cardioStyles.segCountdown,
+                        warningZone && { color: RED },
+                      ]}
+                    >
+                      {formatCountdown(countdown.remaining)}
+                    </Text>
+                  )}
+                </View>
+
+                {/* Warning banner for current segment */}
+                {isCurrent && !isDone && warningZone && (
+                  <View style={cardioStyles.warningBanner}>
+                    <MaterialIcons
+                      name="notifications-active"
+                      size={16}
+                      color={YELLOW}
+                    />
+                    <Text style={cardioStyles.warningText}>
+                      Changing segment soon!
+                    </Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+
+          {/* Finish Button */}
+          <TouchableOpacity
+            style={[cardioStyles.finishBtn, { opacity: allDone ? 1 : 0.5 }]}
+            onPress={onFinish}
+            disabled={!allDone}
+          >
+            <MaterialIcons name="check" size={20} color={WHITE} />
+            <Text style={cardioStyles.finishBtnText}>FINISH CARDIO</Text>
+          </TouchableOpacity>
+
+          {!allDone && (
+            <Text style={cardioStyles.hintText}>
+              Complete all segments to finish
+            </Text>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const cardioStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: DARK_BG },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: BORDER_COLOR,
+  },
+  headerTitle: { color: WHITE, fontSize: 16, fontWeight: "600" },
+  titleArea: { alignItems: "center", marginBottom: 24 },
+  iconCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "#1E1209",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  title: {
+    color: WHITE,
+    fontSize: 24,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  subtitle: { color: SUBTLE_TEXT, fontSize: 15 },
+
+  // Segment cards
+  segmentCard: {
+    backgroundColor: CARD_BG,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  segmentCardActive: { borderColor: ORANGE },
+  segmentCardDone: { borderColor: GREEN, opacity: 0.7 },
+  segmentHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
+  segmentBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: ORANGE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  segmentBadgeText: { color: WHITE, fontSize: 12, fontWeight: "bold" },
+  segmentDuration: { color: WHITE, fontSize: 15, fontWeight: "bold" },
+  segmentDetail: { color: SUBTLE_TEXT, fontSize: 12, marginTop: 1 },
+  segCountdown: {
+    color: ORANGE,
+    fontSize: 20,
+    fontWeight: "bold",
+    fontVariant: ["tabular-nums"],
+  },
+  segControls: { marginTop: 12, alignItems: "center" },
+
+  // Buttons
+  startBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: ORANGE,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 10,
+    gap: 8,
+  },
+  startBtnText: { color: WHITE, fontSize: 15, fontWeight: "bold" },
+  pauseBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: CARD_BG,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER_COLOR,
+    gap: 8,
+  },
+  pauseBtnText: { color: WHITE, fontSize: 15, fontWeight: "bold" },
+  finishBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: GREEN,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 10,
+    gap: 8,
+    marginTop: 24,
+  },
+  finishBtnText: { color: WHITE, fontSize: 15, fontWeight: "bold" },
+
+  // Warning
+  warningBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 10,
+    backgroundColor: "#3D2E0A",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  warningText: { color: YELLOW, fontSize: 13, fontWeight: "600" },
+  hintText: {
+    color: SUBTLE_TEXT,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 8,
+  },
+});
+
+// ─── Main Screen (continued) ────────────────────────────
 
 /** Get today's day-of-week as a DayOfWeek string */
 function getTodayDayOfWeek(): DayOfWeek {
@@ -418,12 +1012,25 @@ export default function TrackWorkoutScreen() {
   const [exercises, setExercises] = useState<TrackingExercise[]>([]);
   const [pickerVisible, setPickerVisible] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startCaloriesRef = useRef<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [routineId, setRoutineId] = useState<string | null>(null);
   const [dayLabel, setDayLabel] = useState<string>("");
   const [isRestDay, setIsRestDay] = useState(false);
+
+  // ─── Cardio state ────────────────────────────────────
+  const [hasCardio, setHasCardio] = useState(false);
+  const [cardioType, setCardioType] = useState<CardioType | undefined>();
+  const [cardioSegments, setCardioSegments] = useState<CardioSegment[]>([]);
+  const [cardioModalVisible, setCardioModalVisible] = useState(false);
+  const [cardioCompleted, setCardioCompleted] = useState(false);
+  const [completedSegments, setCompletedSegments] = useState<boolean[]>([]);
+
+  // ─── Computed: all sets have weight filled in ─────
+  // Allow weight = 0 for bodyweight exercises — just check it's not blank
+  const allSetsHaveWeight =
+    exercises.length > 0 &&
+    exercises.every((ex) => ex.sets.every((s) => s.weight.trim() !== ""));
 
   // Snapshot cumulative active calories at mount for diff-based tracking
   useEffect(() => {
@@ -484,6 +1091,14 @@ export default function TrackWorkoutScreen() {
         }
 
         setRoutineId(routine.id ?? routine._id ?? null);
+
+        // Load cardio configuration from the routine
+        if (routine.hasCardio && routine.cardioSegments?.length > 0) {
+          setHasCardio(true);
+          setCardioType(routine.cardioType);
+          setCardioSegments(routine.cardioSegments);
+          setCompletedSegments(routine.cardioSegments.map(() => false));
+        }
 
         const today = getTodayDayOfWeek();
         if (__DEV__)
@@ -551,15 +1166,15 @@ export default function TrackWorkoutScreen() {
     })();
   }, []);
 
-  // Timer — start only after loading completes
+  // Timer — wall-clock based so it survives backgrounding
+  const timerStartRef = useRef<number>(0);
   useEffect(() => {
     if (loading) return;
-    timerRef.current = setInterval(() => {
-      setElapsed((prev) => prev + 1);
+    timerStartRef.current = Date.now();
+    const iv = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - timerStartRef.current) / 1000));
     }, 1000);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => clearInterval(iv);
   }, [loading]);
 
   // Computed stats
@@ -696,6 +1311,19 @@ export default function TrackWorkoutScreen() {
         payload.caloriesBurned = caloriesBurned;
       }
 
+      // Include cardio data if cardio was completed
+      if (cardioCompleted && hasCardio && cardioSegments.length > 0) {
+        payload.cardio = {
+          type: cardioType || "Treadmill",
+          segments: cardioSegments.map((seg, idx) => ({
+            durationMinutes: parseFloat(seg.durationMinutes) || 0,
+            speed: seg.speed ? parseFloat(seg.speed) : undefined,
+            incline: seg.incline ? parseFloat(seg.incline) : undefined,
+            completed: completedSegments[idx] ?? false,
+          })),
+        };
+      }
+
       const res = await createWorkout(payload);
 
       if (res.ok) {
@@ -716,6 +1344,11 @@ export default function TrackWorkoutScreen() {
     router,
     routineId,
     dayLabel,
+    cardioCompleted,
+    hasCardio,
+    cardioType,
+    cardioSegments,
+    completedSegments,
   ]);
 
   return (
@@ -834,6 +1467,55 @@ export default function TrackWorkoutScreen() {
               <Text style={styles.addExerciseText}>Add Exercise</Text>
             </TouchableOpacity>
 
+            {/* Cardio Button — only shown when routine has cardio */}
+            {hasCardio && cardioSegments.length > 0 && (
+              <View style={{ marginTop: 16 }}>
+                {cardioCompleted ? (
+                  <View style={styles.cardioCompletedBanner}>
+                    <MaterialIcons
+                      name="check-circle"
+                      size={22}
+                      color={GREEN}
+                    />
+                    <Text style={styles.cardioCompletedText}>
+                      {cardioType} Cardio Complete
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    <TouchableOpacity
+                      style={[
+                        styles.startCardioBtn,
+                        !allSetsHaveWeight && styles.startCardioBtnDisabled,
+                      ]}
+                      onPress={() => setCardioModalVisible(true)}
+                      disabled={!allSetsHaveWeight}
+                      activeOpacity={0.7}
+                    >
+                      <MaterialIcons
+                        name="directions-run"
+                        size={22}
+                        color={allSetsHaveWeight ? WHITE : SUBTLE_TEXT}
+                      />
+                      <Text
+                        style={[
+                          styles.startCardioText,
+                          !allSetsHaveWeight && { color: SUBTLE_TEXT },
+                        ]}
+                      >
+                        START CARDIO
+                      </Text>
+                    </TouchableOpacity>
+                    {!allSetsHaveWeight && (
+                      <Text style={styles.cardioHint}>
+                        Enter weight for all sets to unlock cardio (0 is OK)
+                      </Text>
+                    )}
+                  </>
+                )}
+              </View>
+            )}
+
             <View style={{ height: 60 }} />
           </ScrollView>
         </KeyboardAvoidingView>
@@ -844,6 +1526,26 @@ export default function TrackWorkoutScreen() {
         visible={pickerVisible}
         onClose={() => setPickerVisible(false)}
         onSelect={handleAddExercise}
+      />
+
+      {/* Cardio Timer Modal */}
+      <CardioTimerModal
+        visible={cardioModalVisible}
+        onClose={() => setCardioModalVisible(false)}
+        cardioType={cardioType}
+        segments={cardioSegments}
+        completedSegments={completedSegments}
+        onSegmentComplete={(idx) => {
+          setCompletedSegments((prev) => {
+            const updated = [...prev];
+            updated[idx] = true;
+            return updated;
+          });
+        }}
+        onFinish={() => {
+          setCardioCompleted(true);
+          setCardioModalVisible(false);
+        }}
       />
     </SafeAreaView>
   );
@@ -1102,5 +1804,50 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "bold",
     letterSpacing: 0.5,
+  },
+
+  // Cardio button
+  startCardioBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: ORANGE,
+    paddingVertical: 16,
+    borderRadius: 12,
+    gap: 10,
+  },
+  startCardioBtnDisabled: {
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: BORDER_COLOR,
+  },
+  startCardioText: {
+    color: WHITE,
+    fontSize: 15,
+    fontWeight: "bold",
+    letterSpacing: 0.5,
+  },
+  cardioHint: {
+    color: SUBTLE_TEXT,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 8,
+  },
+  cardioCompletedBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0D2E18",
+    paddingVertical: 16,
+    borderRadius: 12,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: GREEN,
+  },
+  cardioCompletedText: {
+    color: GREEN,
+    fontSize: 15,
+    fontWeight: "bold",
+    letterSpacing: 0.3,
   },
 });
