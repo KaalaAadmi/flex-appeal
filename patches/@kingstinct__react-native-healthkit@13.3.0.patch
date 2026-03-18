@@ -1,0 +1,69 @@
+diff --git a/ReactNativeHealthkit.podspec b/ReactNativeHealthkit.podspec
+index e0d40dcfd0ee295b0dbe6113855bf24b2b8d8efe..f42009c26fda225f6a60c2d579cb0b27436e5dd6 100644
+--- a/ReactNativeHealthkit.podspec
++++ b/ReactNativeHealthkit.podspec
+@@ -37,10 +37,23 @@ Pod::Spec.new do |s|
+ 
+   # Workaround for Swift 6.2 (Xcode 26): shared_ptr lost automatic CxxConvertibleToBool conformance,
+   # causing nitrogen-generated Bool(fromCxx:) calls to fail. Replace with use_count() > 0.
+-  # This can be removed once nitrogen fixes the codegen template upstream.
++  # Also fixes std::optional<Enum>.has_value() calling convention mismatch on Xcode 16.x
++  # by routing through the C++ bridge helper functions instead of direct Swift method calls.
+   s.script_phase = {
+     :name => '[ReactNativeHealthkit] Fix Swift 6.2 CxxConvertibleToBool',
+-    :script => "perl -i -pe 's/Bool\\(fromCxx: cachedCxxPart\\)/cachedCxxPart.use_count() > 0/g' \"${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/\"*Spec_cxx.swift 2>/dev/null || true",
++    :script => <<~'SCRIPT',
++      set -e
++      # Fix 1: Swift 6.2 CxxConvertibleToBool
++      perl -i -pe 's/Bool\(fromCxx: cachedCxxPart\)/cachedCxxPart.use_count() > 0/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*Spec_cxx.swift 2>/dev/null || true
++      # Fix 2: std::optional<Enum>.has_value() calling convention mismatch (Xcode 16.x)
++      # Replace direct .has_value() calls with bridge helper function calls
++      perl -i -pe 's/self\.__metadataWeatherCondition\.has_value\(\)/bridge.has_value_std__optional_WeatherCondition_(self.__metadataWeatherCondition)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++      perl -i -pe 's/self\.__metadataInsulinDeliveryReason\.has_value\(\)/bridge.has_value_std__optional_InsulinDeliveryReason_(self.__metadataInsulinDeliveryReason)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++      perl -i -pe 's/self\.__metadataHeartRateMotionContext\.has_value\(\)/bridge.has_value_std__optional_HeartRateMotionContext_(self.__metadataHeartRateMotionContext)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++      perl -i -pe 's/self\.__workoutActivityType\.has_value\(\)/bridge.has_value_std__optional_WorkoutActivityType_(self.__workoutActivityType)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++      perl -i -pe 's/self\.__operatorType\.has_value\(\)/bridge.has_value_std__optional_ComparisonPredicateOperator_(self.__operatorType)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++      perl -i -pe 's/self\.__locationType\.has_value\(\)/bridge.has_value_std__optional_WorkoutSessionLocationType_(self.__locationType)/g' "${PODS_TARGET_SRCROOT}/nitrogen/generated/ios/swift/"*.swift 2>/dev/null || true
++    SCRIPT
+     :execution_position => :before_compile,
+   }
+ 
+diff --git a/ios/Helpers.swift b/ios/Helpers.swift
+index 87d24d6fb230b06c1e9f26c84e1f9af9fe081c7d..4bfe5e0e18a6a587a0cc002e7b3ff07630300917 100644
+--- a/ios/Helpers.swift
++++ b/ios/Helpers.swift
+@@ -106,7 +106,7 @@ func sampleQueryAsync(
+       sampleType: sampleType,
+       predicate: predicate,
+       limit: limit,
+-      sortDescriptors: sortDescriptors,
++      sortDescriptors: sortDescriptors
+     ) { (_: HKSampleQuery, samples: [HKSample]?, error: Error?) in
+       if let error = error {
+         return continuation.resume(throwing: error)
+diff --git a/ios/MedicationModule.swift b/ios/MedicationModule.swift
+index 39369c656804af8ab947d5dde1daad7a30a5993b..7770818b5f6ddb735092fbf77ff096fcbb77cf28 100644
+--- a/ios/MedicationModule.swift
++++ b/ios/MedicationModule.swift
+@@ -174,7 +174,7 @@ import NitroModules
+         relatedCodings: medication.medication.relatedCodings.map({ c in
+           return RelatedCoding(system: c.system, code: c.code, version: c.version)
+         })
+-      ),
++      )
+     )
+   }
+ 
+diff --git a/ios/PredicateHelpers.swift b/ios/PredicateHelpers.swift
+index c2f3daa166227363024d420962b60b36981b4dea..4bf61235d53a9db7ac37797bbdc5d8fb88d6ee1b 100644
+--- a/ios/PredicateHelpers.swift
++++ b/ios/PredicateHelpers.swift
+@@ -75,7 +75,7 @@ func getPredicateForWorkoutBase(_ filter: FilterForWorkouts?) -> FilterForWorkou
+       uuid: filter.uuid,
+       uuids: filter.uuids,
+       metadata: filter.metadata,
+-      date: filter.date,
++      date: filter.date
+     )
+   }
+   return nil

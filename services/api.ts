@@ -221,6 +221,15 @@ export async function deleteWorkout(id: string) {
   return apiFetch(`/workouts/${id}`, { method: "DELETE" });
 }
 
+export async function getPreviousWorkoutData(
+  exercises: { name: string; equipment: string }[],
+) {
+  return apiFetch("/workouts/previous", {
+    method: "POST",
+    body: JSON.stringify({ exercises }),
+  });
+}
+
 // ─── Stats ───────────────────────────────────────────
 
 export async function getStatsSummary(period?: string) {

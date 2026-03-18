@@ -528,8 +528,8 @@ export async function maybeSyncUserDetailsDaily(): Promise<void> {
 const HEALTH_DATA_SYNC_KEY = "healthkit_data_last_sync";
 
 /**
- * Sync recent health data (last 7 days) from HealthKit to the backend
- * every time the app is opened, but throttle to at most once per 30 minutes
+ * Sync recent health data (last 14 days) from HealthKit to the backend
+ * every time the app is opened, but throttle to at most once per 5 minutes
  * to avoid hammering the API on rapid tab switches.
  */
 export async function syncHealthDataOnAppOpen(): Promise<void> {
@@ -540,15 +540,15 @@ export async function syncHealthDataOnAppOpen(): Promise<void> {
     const lastSync = await SecureStore.getItemAsync(HEALTH_DATA_SYNC_KEY);
     const lastSyncMs = lastSync ? parseInt(lastSync, 10) : 0;
 
-    // Throttle: skip if synced less than 30 min ago
-    if (now - lastSyncMs < 30 * 60 * 1000) return;
+    // Throttle: skip if synced less than 5 min ago
+    if (now - lastSyncMs < 5 * 60 * 1000) return;
 
     // Check if Apple Health was ever connected by seeing if the HK module loads
     const HK = getHK();
     if (!HK) return;
 
-    console.log("[HealthKit] App-open sync: fetching last 7 days…");
-    const result = await fetchAndSyncHealthData(7);
+    console.log("[HealthKit] App-open sync: fetching last 14 days…");
+    const result = await fetchAndSyncHealthData(14);
     console.log("[HealthKit] App-open sync complete:", result.synced, "days");
 
     await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(now));

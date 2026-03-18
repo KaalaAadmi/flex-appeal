@@ -503,18 +503,35 @@ function SingleExerciseChart({
   if (exercise.sessions.length === 0) return null;
 
   const sessions = exercise.sessions;
-  let minW = Infinity;
-  let maxW = -Infinity;
-  for (const s of sessions) {
-    if (s.bestWeight < minW) minW = s.bestWeight;
-    if (s.bestWeight > maxW) maxW = s.bestWeight;
+
+  // Compute best volume (weight × reps) per session for the chart Y-axis
+  const sessionVolumes = sessions.map((s) => {
+    let bestVol = 0;
+    let bestW = 0;
+    let bestR = 0;
+    for (const set of s.sets) {
+      const vol = (set.weight || 0) * (set.reps || 0);
+      if (vol > bestVol) {
+        bestVol = vol;
+        bestW = set.weight;
+        bestR = set.reps;
+      }
+    }
+    return { volume: bestVol, weight: bestW, reps: bestR };
+  });
+
+  let minV = Infinity;
+  let maxV = -Infinity;
+  for (const sv of sessionVolumes) {
+    if (sv.volume < minV) minV = sv.volume;
+    if (sv.volume > maxV) maxV = sv.volume;
   }
-  if (minW === Infinity) minW = 0;
-  if (maxW === -Infinity) maxW = 1;
+  if (minV === Infinity) minV = 0;
+  if (maxV === -Infinity) maxV = 1;
   // Add 10% padding so dots don't touch edges
-  const padding = (maxW - minW) * 0.1 || 1;
-  const rangeMin = Math.max(0, minW - padding);
-  const rangeMax = maxW + padding;
+  const padding = (maxV - minV) * 0.1 || 1;
+  const rangeMin = Math.max(0, minV - padding);
+  const rangeMax = maxV + padding;
   const range = rangeMax - rangeMin || 1;
 
   const DOT_SIZE = 12;
@@ -525,12 +542,12 @@ function SingleExerciseChart({
   const paddingBottom = 10;
   const usableH = chartH - paddingTop - paddingBottom;
 
-  const getY = (weight: number) =>
-    paddingTop + usableH - ((weight - rangeMin) / range) * usableH;
+  const getY = (volume: number) =>
+    paddingTop + usableH - ((volume - rangeMin) / range) * usableH;
 
   const points = sessions.map((s, i) => ({
     x: i * POINT_GAP + POINT_GAP / 2 + 40,
-    y: getY(s.bestWeight),
+    y: getY(sessionVolumes[i].volume),
     sessionIdx: i,
   }));
 
@@ -542,8 +559,8 @@ function SingleExerciseChart({
     >
       <View style={{ width: chartWidth, height: chartH + 30 }}>
         {/* Y-axis labels */}
-        <Text style={progStyles.yLabelTop}>{Math.round(rangeMax)} kg</Text>
-        <Text style={progStyles.yLabelBottom}>{Math.round(rangeMin)} kg</Text>
+        <Text style={progStyles.yLabelTop}>{Math.round(rangeMax)}</Text>
+        <Text style={progStyles.yLabelBottom}>{Math.round(rangeMin)}</Text>
 
         {/* Grid lines */}
         {[0.25, 0.5, 0.75].map((frac) => (
@@ -607,22 +624,22 @@ function SingleExerciseChart({
           />
         ))}
 
-        {/* Weight labels on dots */}
+        {/* Weight × Reps labels on dots */}
         {points.map((pt, i) => (
           <Text
             key={`wt-${i}`}
             style={{
               position: "absolute",
-              left: pt.x - 20,
+              left: pt.x - 24,
               top: pt.y - 18,
-              width: 40,
+              width: 48,
               textAlign: "center",
               color: SUBTLE_TEXT,
-              fontSize: 9,
+              fontSize: 8,
               fontWeight: "500",
             }}
           >
-            {sessions[i].bestWeight}
+            {sessionVolumes[i].weight}×{sessionVolumes[i].reps}
           </Text>
         ))}
 
@@ -1186,7 +1203,7 @@ export default function InsightsScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={s.cardTitle}>Exercise Progression</Text>
                   <Text style={s.cardSubtitle}>
-                    Best weight per session · Tap a point for details
+                    Best set volume per session · Tap a point for details
                   </Text>
                 </View>
                 <View style={s.weekSelector}>
@@ -1236,14 +1253,21 @@ export default function InsightsScreen() {
                     if (ex.sessions.length === 0) return null;
                     const color =
                       PROGRESSION_COLORS[idx % PROGRESSION_COLORS.length];
-                    const pr = Math.max(
-                      ...ex.sessions.map((se) => se.bestWeight),
-                    );
-                    const prSession = ex.sessions.reduce(
-                      (best, se) =>
-                        se.bestWeight > (best?.bestWeight ?? 0) ? se : best,
-                      ex.sessions[0],
-                    );
+
+                    // Find the PR by best single-set volume (weight × reps)
+                    let prWeight = 0;
+                    let prReps = 0;
+                    let prVolume = 0;
+                    for (const session of ex.sessions) {
+                      for (const set of session.sets) {
+                        const vol = (set.weight || 0) * (set.reps || 0);
+                        if (vol > prVolume) {
+                          prVolume = vol;
+                          prWeight = set.weight;
+                          prReps = set.reps;
+                        }
+                      }
+                    }
 
                     return (
                       <View key={ex.exerciseId || ex.name}>
@@ -1254,7 +1278,7 @@ export default function InsightsScreen() {
                             {ex.name}
                           </Text>
                           <Text style={s.exChartPr}>
-                            PR: {pr} kg × {prSession.bestReps}
+                            PR: {prWeight} kg × {prReps}
                           </Text>
                         </View>
 

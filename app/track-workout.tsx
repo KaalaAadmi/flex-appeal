@@ -31,6 +31,7 @@ import {
   getExercises,
   getActiveRoutine,
   getRoutines,
+  getPreviousWorkoutData,
 } from "@/services/api";
 import { getCumulativeActiveCalories } from "@/services/health";
 
@@ -1158,6 +1159,43 @@ export default function TrackWorkoutScreen() {
         );
 
         setExercises(mapped);
+
+        // Fetch previous workout data for these exercises
+        try {
+          const exerciseList = (todayDay.exercises || []).map((ex: any) => ({
+            name: ex.name,
+            equipment: ex.equipment || "",
+          }));
+          if (exerciseList.length > 0) {
+            const prevRes = await getPreviousWorkoutData(exerciseList);
+            if (prevRes.ok) {
+              const prevJson = await prevRes.json();
+              const prevData = prevJson.previous || {};
+
+              setExercises((current) =>
+                current.map((ex) => {
+                  const key = `${ex.name}||${ex.equipment}`;
+                  const prev = prevData[key];
+                  if (!prev || !prev.sets) return ex;
+
+                  return {
+                    ...ex,
+                    sets: ex.sets.map((s, sIdx) => {
+                      const prevSet = prev.sets[sIdx];
+                      if (!prevSet) return s; // no previous data for this set index
+                      return {
+                        ...s,
+                        previous: `${prevSet.weight} × ${prevSet.reps}`,
+                      };
+                    }),
+                  };
+                }),
+              );
+            }
+          }
+        } catch (prevErr) {
+          console.warn("Failed to load previous workout data:", prevErr);
+        }
       } catch (err) {
         console.warn("Failed to load active routine:", err);
       } finally {
@@ -1252,16 +1290,44 @@ export default function TrackWorkoutScreen() {
   }, []);
 
   const handleAddExercise = useCallback((item: ExerciseCatalogItem) => {
-    setExercises((prev) => [
-      ...prev,
-      {
-        id: nextExerciseId(),
-        name: item.name,
-        equipment: item.equipment,
-        sets: [{ id: nextSetId(), weight: "", reps: "", previous: "—" }],
-      },
-    ]);
+    const newExercise: TrackingExercise = {
+      id: nextExerciseId(),
+      name: item.name,
+      equipment: item.equipment,
+      sets: [{ id: nextSetId(), weight: "", reps: "", previous: "—" }],
+    };
+    setExercises((prev) => [...prev, newExercise]);
     setPickerVisible(false);
+
+    // Fetch previous data for this newly added exercise
+    getPreviousWorkoutData([{ name: item.name, equipment: item.equipment }])
+      .then(async (res) => {
+        if (!res.ok) return;
+        const json = await res.json();
+        const prevData = json.previous || {};
+        const key = `${item.name}||${item.equipment}`;
+        const prev = prevData[key];
+        if (!prev || !prev.sets) return;
+
+        setExercises((current) =>
+          current.map((ex) => {
+            if (ex.name !== item.name || ex.equipment !== item.equipment)
+              return ex;
+            return {
+              ...ex,
+              sets: ex.sets.map((s, sIdx) => {
+                const prevSet = prev.sets[sIdx];
+                if (!prevSet) return s;
+                return {
+                  ...s,
+                  previous: `${prevSet.weight} × ${prevSet.reps}`,
+                };
+              }),
+            };
+          }),
+        );
+      })
+      .catch(() => {});
   }, []);
 
   const handleSave = useCallback(async () => {

@@ -21,6 +21,7 @@ import {
   healthKitUnavailableReason,
   fetchAndSyncHealthData,
   syncUserDetailsFromHealthKit,
+  syncHealthDataOnAppOpen,
 } from "@/services/health";
 
 const ORANGE = "#E8651A";
@@ -237,7 +238,11 @@ export default function ProfileScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      fetchProfile();
+      // Sync health data (including weight) from HealthKit, then fetch profile
+      syncHealthDataOnAppOpen()
+        .then(() => syncUserDetailsFromHealthKit())
+        .catch(() => {})
+        .finally(() => fetchProfile());
     }, [fetchProfile]),
   );
 
