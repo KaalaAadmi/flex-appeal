@@ -10,7 +10,7 @@
       "node": "20.18.1",
       "pnpm": "10.11.0",
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.1"
+        "image": "macos-sequoia-15.6-xcode-16.4"
       }
     },
     "preview": {
@@ -18,7 +18,7 @@
       "node": "20.18.1",
       "pnpm": "10.11.0",
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.1"
+        "image": "macos-sequoia-15.6-xcode-16.4"
       }
     },
     "production": {
@@ -26,7 +26,7 @@
       "node": "20.18.1",
       "pnpm": "10.11.0",
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.1"
+        "image": "macos-sequoia-15.6-xcode-16.4"
       }
     }
   },
