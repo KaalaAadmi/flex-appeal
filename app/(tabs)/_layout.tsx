@@ -51,15 +51,20 @@ export default function TabLayout() {
   useEffect(() => {
     if (isSignedIn && !hasSynced.current) {
       hasSynced.current = true;
-      maybeSyncUserDetailsDaily().catch((err) =>
-        console.warn("[TabLayout] daily health sync error:", err),
-      );
-      // Sync recent health data on app open
-      syncHealthDataOnAppOpen().catch((err) =>
-        console.warn("[TabLayout] app-open health data sync error:", err),
-      );
-      // Register background fetch for periodic syncs
-      registerBackgroundFetch();
+
+      // Small delay to let Clerk session hydrate fully so tokens are ready
+      const timeout = setTimeout(() => {
+        maybeSyncUserDetailsDaily().catch((err) =>
+          console.warn("[TabLayout] daily health sync error:", err),
+        );
+        syncHealthDataOnAppOpen().catch((err) =>
+          console.warn("[TabLayout] app-open health data sync error:", err),
+        );
+        // Register background fetch for periodic syncs
+        registerBackgroundFetch();
+      }, 2000);
+
+      return () => clearTimeout(timeout);
     }
   }, [isSignedIn]);
 
@@ -69,9 +74,12 @@ export default function TabLayout() {
 
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
-        syncHealthDataOnAppOpen().catch((err) =>
-          console.warn("[TabLayout] foreground health sync error:", err),
-        );
+        // Small delay to let Clerk session token refresh after foregrounding
+        setTimeout(() => {
+          syncHealthDataOnAppOpen().catch((err) =>
+            console.warn("[TabLayout] foreground health sync error:", err),
+          );
+        }, 1500);
       }
     });
 

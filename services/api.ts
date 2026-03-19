@@ -23,15 +23,26 @@ export { API_BASE_URL };
 /**
  * Get the Clerk session token using the official Clerk instance.
  * This is the recommended way to access the token outside React components.
+ *
+ * Retries up to 3 times with a 1-second delay if the session/token is not
+ * yet available (e.g. right after app cold-start or foregrounding).
  */
 async function getToken(): Promise<string | null> {
-  try {
-    const clerk = getClerkInstance();
-    const token = await clerk.session?.getToken();
-    return token ?? null;
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const clerk = getClerkInstance();
+      const token = await clerk.session?.getToken();
+      if (token) return token;
+    } catch {
+      // ignore
+    }
+    // Wait 1s before retrying (only if we'll retry)
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
+  console.warn("[API] getToken: no token after 3 attempts");
+  return null;
 }
 
 /**

@@ -145,15 +145,35 @@ export function healthKitUnavailableReason(): string | null {
 
 /**
  * Fetch health data for a given date range and sync to backend.
+ * Returns { synced: N, success: true } on success, or { synced: 0, success: false } on failure.
  */
 export async function fetchAndSyncHealthData(
   daysBack: number = 7,
-): Promise<{ synced: number }> {
-  if (Platform.OS !== "ios") return { synced: 0 };
+): Promise<{ synced: number; success: boolean }> {
+  if (Platform.OS !== "ios") return { synced: 0, success: false };
+
+  const HK = getHK();
+  if (!HK) {
+    console.warn("[HealthKit] fetchAndSync: HK module not available");
+    return { synced: 0, success: false };
+  }
+
+  // Re-request authorization each time to ensure permissions are active.
+  // This is idempotent — it won't re-prompt if already granted.
+  try {
+    await HK.requestAuthorization({ toRead: READ_TYPES });
+  } catch (authErr) {
+    console.warn("[HealthKit] fetchAndSync: auth request failed:", authErr);
+    return { synced: 0, success: false };
+  }
 
   const endDate = new Date();
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - daysBack);
+
+  console.log(
+    `[HealthKit] fetchAndSync: querying ${daysBack} days (${startDate.toISOString()} → ${endDate.toISOString()})`,
+  );
 
   try {
     // Fetch all data in parallel
@@ -176,6 +196,10 @@ export async function fetchAndSyncHealthData(
       querySamples(QTY.fat, startDate, endDate),
       querySamples(QTY.bodyMass, startDate, endDate),
     ]);
+
+    console.log(
+      `[HealthKit] fetchAndSync: samples received — activeEnergy=${activeEnergy.length}, basalEnergy=${basalEnergy.length}, steps=${steps.length}, dietaryEnergy=${dietaryEnergy.length}, bodyWeight=${bodyWeight.length}`,
+    );
 
     // Group all data by date
     const dateMap: Record<string, Record<string, number>> = {};
@@ -224,19 +248,31 @@ export async function fetchAndSyncHealthData(
       bodyWeightKg: values.bodyWeightKg || undefined,
     }));
 
-    if (entries.length === 0) return { synced: 0 };
+    if (entries.length === 0) {
+      console.log("[HealthKit] fetchAndSync: no entries to sync");
+      return { synced: 0, success: true }; // success=true: query worked, just no data
+    }
+
+    console.log(
+      `[HealthKit] fetchAndSync: syncing ${entries.length} day(s) to backend…`,
+    );
 
     // Sync to backend
     const res = await syncHealthData(entries);
     if (res.ok) {
       const json = await res.json();
-      return { synced: json.synced || entries.length };
+      console.log("[HealthKit] fetchAndSync: backend responded OK:", json);
+      return { synced: json.synced || entries.length, success: true };
     }
 
-    return { synced: 0 };
+    // API call failed — do NOT treat this as a successful sync
+    console.warn(
+      `[HealthKit] fetchAndSync: backend returned ${res.status} ${res.statusText}`,
+    );
+    return { synced: 0, success: false };
   } catch (error) {
-    console.warn("[HealthKit] Sync error:", error);
-    return { synced: 0 };
+    console.warn("[HealthKit] fetchAndSync: error:", error);
+    return { synced: 0, success: false };
   }
 }
 
@@ -531,6 +567,10 @@ const HEALTH_DATA_SYNC_KEY = "healthkit_data_last_sync";
  * Sync recent health data (last 14 days) from HealthKit to the backend
  * every time the app is opened, but throttle to at most once per 5 minutes
  * to avoid hammering the API on rapid tab switches.
+ *
+ * IMPORTANT: The "last sync" timestamp is ONLY saved on a successful sync.
+ * If the sync fails (auth error, network issue, etc.), the timestamp is
+ * NOT updated — so the next app open / foreground event will retry.
  */
 export async function syncHealthDataOnAppOpen(): Promise<void> {
   if (Platform.OS !== "ios") return;
@@ -541,20 +581,58 @@ export async function syncHealthDataOnAppOpen(): Promise<void> {
     const lastSyncMs = lastSync ? parseInt(lastSync, 10) : 0;
 
     // Throttle: skip if synced less than 5 min ago
-    if (now - lastSyncMs < 5 * 60 * 1000) return;
+    if (now - lastSyncMs < 5 * 60 * 1000) {
+      console.log(
+        "[HealthKit] App-open sync: throttled (last sync",
+        Math.round((now - lastSyncMs) / 1000),
+        "s ago)",
+      );
+      return;
+    }
 
     // Check if Apple Health was ever connected by seeing if the HK module loads
     const HK = getHK();
     if (!HK) return;
 
-    console.log("[HealthKit] App-open sync: fetching last 14 days…");
+    console.log("[HealthKit] App-open sync: starting…");
     const result = await fetchAndSyncHealthData(14);
-    console.log("[HealthKit] App-open sync complete:", result.synced, "days");
+    console.log("[HealthKit] App-open sync result:", JSON.stringify(result));
 
-    await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(now));
+    // Only save the timestamp if the sync actually succeeded.
+    // This ensures failed syncs (auth issues, network errors) are retried.
+    if (result.success) {
+      await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(now));
+    } else {
+      console.warn(
+        "[HealthKit] App-open sync FAILED — will retry on next app open/foreground",
+      );
+    }
   } catch (err) {
     console.warn("[HealthKit] syncHealthDataOnAppOpen error:", err);
+    // Do NOT save timestamp on error — allow retry
   }
+}
+
+/**
+ * Force a health data sync, bypassing the 5-minute throttle.
+ * Useful for manual "Sync Now" in the profile screen.
+ * Syncs the last 30 days to catch any gaps.
+ */
+export async function forceHealthDataSync(): Promise<{
+  synced: number;
+  success: boolean;
+}> {
+  if (Platform.OS !== "ios") return { synced: 0, success: false };
+
+  console.log("[HealthKit] Force sync: fetching last 30 days…");
+  const result = await fetchAndSyncHealthData(30);
+  console.log("[HealthKit] Force sync result:", JSON.stringify(result));
+
+  if (result.success) {
+    await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(Date.now()));
+  }
+
+  return result;
 }
 
 // ─── Background Fetch Task ──────────────────────────
@@ -579,10 +657,15 @@ export async function runBackgroundHealthSync(): Promise<number> {
     // Also sync user details
     await syncUserDetailsFromHealthKit();
 
-    console.log("[HealthKit] Background sync complete:", result.synced, "days");
+    console.log(
+      "[HealthKit] Background sync complete:",
+      JSON.stringify(result),
+    );
 
-    // Store timestamp
-    await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(Date.now()));
+    // Only store timestamp if sync succeeded
+    if (result.success) {
+      await SecureStore.setItemAsync(HEALTH_DATA_SYNC_KEY, String(Date.now()));
+    }
 
     return result.synced > 0 ? 2 : 3; // NewData : NoData
   } catch (err) {

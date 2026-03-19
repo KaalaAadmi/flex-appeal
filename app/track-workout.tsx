@@ -1019,6 +1019,8 @@ export default function TrackWorkoutScreen() {
   const [dayLabel, setDayLabel] = useState<string>("");
   const [isRestDay, setIsRestDay] = useState(false);
 
+  const [saving, setSaving] = useState(false);
+
   // ─── Cardio state ────────────────────────────────────
   const [hasCardio, setHasCardio] = useState(false);
   const [cardioType, setCardioType] = useState<CardioType | undefined>();
@@ -1331,6 +1333,9 @@ export default function TrackWorkoutScreen() {
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (saving) return; // prevent double-tap
+    setSaving(true);
+
     // Build the exercises payload for the API
     const exercisePayload = exercises.map((ex) => ({
       name: ex.name,
@@ -1397,12 +1402,15 @@ export default function TrackWorkoutScreen() {
           { text: "OK", onPress: () => router.back() },
         ]);
       } else {
+        setSaving(false);
         Alert.alert("Error", "Failed to save workout. Please try again.");
       }
     } catch {
+      setSaving(false);
       Alert.alert("Error", "Network error. Please check your connection.");
     }
   }, [
+    saving,
     workoutName,
     description,
     exercises,
@@ -1428,15 +1436,22 @@ export default function TrackWorkoutScreen() {
           <MaterialIcons name="arrow-back" size={24} color={WHITE} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Track Workout</Text>
-        <TouchableOpacity onPress={handleSave} disabled={loading || isRestDay}>
-          <Text
-            style={[
-              styles.saveText,
-              (loading || isRestDay) && { opacity: 0.4 },
-            ]}
-          >
-            SAVE
-          </Text>
+        <TouchableOpacity
+          onPress={handleSave}
+          disabled={loading || isRestDay || saving}
+        >
+          {saving ? (
+            <ActivityIndicator size="small" color={ORANGE} />
+          ) : (
+            <Text
+              style={[
+                styles.saveText,
+                (loading || isRestDay || saving) && { opacity: 0.4 },
+              ]}
+            >
+              SAVE
+            </Text>
+          )}
         </TouchableOpacity>
       </View>
 

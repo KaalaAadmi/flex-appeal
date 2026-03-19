@@ -22,6 +22,7 @@ import {
   fetchAndSyncHealthData,
   syncUserDetailsFromHealthKit,
   syncHealthDataOnAppOpen,
+  forceHealthDataSync,
 } from "@/services/health";
 
 const ORANGE = "#E8651A";
@@ -170,6 +171,7 @@ export default function ProfileScreen() {
   // Connected apps
   const [appleHealthConnected, setAppleHealthConnected] = useState(false);
   const [mfpConnected, setMfpConnected] = useState(false);
+  const [healthSyncing, setHealthSyncing] = useState(false);
 
   // Whether calorie/protein goals were manually typed (prevents auto-overwrite)
   const [goalsManuallySet, setGoalsManuallySet] = useState(false);
@@ -305,6 +307,32 @@ export default function ProfileScreen() {
       Alert.alert("Error", "Failed to save profile.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleForceHealthSync = async () => {
+    if (healthSyncing) return;
+    setHealthSyncing(true);
+    try {
+      const result = await forceHealthDataSync();
+      if (result.success) {
+        Alert.alert(
+          "Sync Complete",
+          result.synced > 0
+            ? `Synced ${result.synced} day(s) of health data.`
+            : "Health data is already up to date.",
+        );
+      } else {
+        Alert.alert(
+          "Sync Failed",
+          "Could not sync health data. Please check your Apple Health permissions and try again.",
+        );
+      }
+    } catch (err) {
+      Alert.alert("Error", "An unexpected error occurred during sync.");
+      console.warn("[Profile] forceHealthSync error:", err);
+    } finally {
+      setHealthSyncing(false);
     }
   };
 
@@ -984,6 +1012,44 @@ export default function ProfileScreen() {
               </Text>
             </View>
           </TouchableOpacity>
+
+          {/* Sync Now button — only visible when Apple Health is connected */}
+          {appleHealthConnected && (
+            <TouchableOpacity
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                paddingVertical: 10,
+                paddingHorizontal: 16,
+                marginBottom: 12,
+                borderRadius: 8,
+                backgroundColor: "#1E1E1E",
+                borderWidth: 1,
+                borderColor: ORANGE,
+                opacity: healthSyncing ? 0.6 : 1,
+              }}
+              onPress={handleForceHealthSync}
+              disabled={healthSyncing}
+              activeOpacity={0.7}
+            >
+              {healthSyncing ? (
+                <ActivityIndicator size="small" color={ORANGE} />
+              ) : (
+                <MaterialIcons name="sync" size={18} color={ORANGE} />
+              )}
+              <Text
+                style={{
+                  color: ORANGE,
+                  fontSize: 14,
+                  fontWeight: "600",
+                  marginLeft: 8,
+                }}
+              >
+                {healthSyncing ? "Syncing…" : "Sync Health Data Now"}
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {/* MyFitnessPal */}
           <TouchableOpacity
