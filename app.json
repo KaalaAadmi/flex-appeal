@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Flex Appeal",
-    "slug": "flex-appeal",
+    "slug": "mobile-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
